@@ -22,6 +22,7 @@ phone telnet session.
   4-day fall, higher still when today is up. It does not affect sorting.
 - Up-day streak with an ALERT from 2 consecutive up days, continued from the
   storage file.
+- Optional JSON output of the scan (`-j`), see below.
 - Detailed view of a single ticker or of any URL.
 - Offline mode: parse a previously saved response (`-i`).
 - Certificate diagnosis mode (`--diag`) to find which TLS checks fail on the
@@ -30,7 +31,7 @@ phone telnet session.
 ## Usage
 
 ```
-wp81Equities.exe [-s FILE] [-n] [-k | -u]
+wp81Equities.exe [-s FILE] [-n] [-j FILE] [-k | -u]
     scan all tracked tickers, sorted by short-term score
 wp81Equities.exe [-s FILE] [-n] [-o FILE] [-k | -u] TICKER | URL
     show one ticker in detail
@@ -45,6 +46,7 @@ wp81Equities.exe -h | --help
 |-----------|----------------------------------------------------------|
 | `-s FILE` | use FILE as the storage instead of `euronext_storage.json` |
 | `-n`      | do not update the storage                                |
+| `-j FILE` | scan: also write the ranked list to FILE as JSON  |
 | `-o FILE` | save the response body to FILE                           |
 | `-i FILE` | parse a saved response instead of fetching               |
 | `-k`      | ignore all certificate errors (diagnosis only, unsafe)   |
@@ -54,6 +56,7 @@ Examples:
 
 ```
 wp81Equities.exe
+wp81Equities.exe -j scan.json
 wp81Equities.exe AIR.PA
 wp81Equities.exe -o airbus.json AIR.PA
 wp81Equities.exe -n -i airbus.json
@@ -61,6 +64,97 @@ wp81Equities.exe -n -i airbus.json
 
 Exit codes: `0` success, `1` failure (scan: at least one ticker failed),
 `2` invalid arguments.
+
+## JSON output
+
+`-j FILE` writes the scan result, with the same content as the console:
+
+```json
+{
+  "generated": "2026-10-09T17:45:12Z",
+  "stocks": 54,
+  "alerts": 3,
+  "failed": 1,
+  "ranked": [
+    {
+      "rank": 1,
+      "symbol": "AIR.PA",
+      "name": "Airbus SE",
+      "categories": ["Aerospace", "Defense"],
+      "score": 78.4,
+      "class": "STRONG SHORT-TERM",
+      "class_range": "75+",
+      "rebound": 20,
+      "streak": 3,
+      "alert": true,
+      "currency": "EUR",
+      "close": 196.5,
+      "change": 2.1,
+      "change_pct": 1.08,
+      "span_days": 4,
+      "span_change": 5.3,
+      "span_pct": 2.77,
+      "session_in_progress": false
+    }
+  ],
+  "not_scored": [
+    { "symbol": "XYZ.PA", "problem": "WARNING: XYZ.PA: no market data available" }
+  ]
+}
+```
+
+Prices and percentages are rounded to 2 decimals and the score to 1, as
+printed on the console.
+
+Top level:
+
+| Property     | Type   | Meaning                                                        |
+|--------------|--------|----------------------------------------------------------------|
+| `generated`  | string | time the file was written, UTC, ISO 8601 (phone clock)         |
+| `stocks`     | number | tickers in the scan (the `EQUITIES` table)                     |
+| `alerts`     | number | scored tickers with an up-day streak of 2 or more              |
+| `failed`     | number | tickers that could not be scored (listed in `not_scored`)      |
+| `ranked`     | array  | scored tickers, sorted by score, best first (see below)        |
+| `not_scored` | array  | tickers that could not be scored, in `EQUITIES` order          |
+
+Each entry of `ranked`:
+
+| Property              | Type           | Meaning                                                                 |
+|-----------------------|----------------|-------------------------------------------------------------------------|
+| `rank`                | number         | position in the list, from 1; ties keep the `EQUITIES` order            |
+| `symbol`              | string         | Yahoo Finance symbol, e.g. `AIR.PA`                                     |
+| `name`                | string         | company name from Yahoo (long name, else short name, else symbol)       |
+| `categories`          | array          | categories from the `EQUITIES` table (up to 3)                          |
+| `score`               | number         | short-term momentum score, 0-100: the sort key                          |
+| `class`               | string         | score class: `STRONG SHORT-TERM`, `INTERESTING`, `WATCH`, `NEUTRAL`, `WEAK` |
+| `class_range`         | string         | score range of the class: `75+`, `65-75`, `55-65`, `45-55`, `<45`       |
+| `rebound`             | number         | rebound score, 20-95: high after a large multi-day fall, more when today is up; not used to sort |
+| `streak`              | number         | consecutive up days (finished sessions only), continued from the storage file |
+| `alert`               | boolean        | `true` when `streak` is 2 or more                                       |
+| `currency`            | string         | currency of the prices, e.g. `EUR`                                      |
+| `close`               | number         | last price                                                              |
+| `change`              | number         | `close` minus the previous close                                        |
+| `change_pct`          | number         | `change` in percent of the previous close                               |
+| `span_days`           | number or null | sessions covered by the multi-day change (usually 4)                    |
+| `span_change`         | number or null | `close` minus the close `span_days` sessions earlier                    |
+| `span_pct`            | number or null | `span_change` in percent of that earlier close                          |
+| `session_in_progress` | boolean        | `true` while today's session is still open (see below)                  |
+
+The `span_*` properties are `null` when Yahoo returned a single close.
+
+When `session_in_progress` is `true`, `close` is a live price, not a final
+close: `change`, `change_pct`, the `span_*` values, `score` and `rebound`
+are provisional and will move until the market closes. The streak ignores
+that price and only counts finished sessions, so during market hours it can
+lag one day behind the other values; today is counted on a run after the
+close.
+
+Each entry of `not_scored`:
+
+| Property  | Type   | Meaning                                                             |
+|-----------|--------|---------------------------------------------------------------------|
+| `symbol`  | string | Yahoo Finance symbol                                                |
+| `problem` | string | the console message, `ERROR: ...` (request or parsing failed) or `WARNING: ...` (no market data) |
 
 ## How HTTPS works on WP8.1
 

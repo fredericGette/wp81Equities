@@ -49,6 +49,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include "cJSON/cJSON.h"
 #include "byte_buffer.h"
 #include "yahoo_chart.h"
 #include "tracker.h"
@@ -625,11 +627,107 @@ static void PrintScanLine(const ScanEntry& entry)
                chart.currency, prices.changePct, span, inProgress);
 }
 
+// Same content as the console output of a scan: the scored tickers in rank
+// order (order[0..orderCount-1] index entries), then the ones not scored.
+// Values are rounded as printed. Returns false with the reason in error.
+static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, const int* order, int orderCount,
+                          int alerts, int failures, char* error, size_t errorSize)
+{
+    SYSTEMTIME now;
+    GetSystemTime(&now);
+    char generated[32];
+    _snprintf_s(generated, _countof(generated), _TRUNCATE, "%04u-%02u-%02uT%02u:%02u:%02uZ",
+                now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "generated", generated);
+    cJSON_AddNumberToObject(root, "stocks", EQUITY_COUNT);
+    cJSON_AddNumberToObject(root, "alerts", alerts);
+    cJSON_AddNumberToObject(root, "failed", failures);
+
+    cJSON* ranked = cJSON_AddArrayToObject(root, "ranked");
+    for (int k = 0; k < orderCount; ++k)
+    {
+        const ScanEntry&    entry  = entries[order[k]];
+        const ChartData&    chart  = entry.chart;
+        const TickerReport& report = entry.report;
+        const PriceSummary& prices = report.prices;
+
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddItemToArray(ranked, item);
+        cJSON_AddNumberToObject(item, "rank", k + 1);
+        cJSON_AddStringToObject(item, "symbol", entry.equity->symbol);
+        cJSON_AddStringToObject(item, "name", chart.name);
+        cJSON* categories = cJSON_AddArrayToObject(item, "categories");
+        for (int i = 0; i < EQUITY_MAX_CATEGORIES && entry.equity->categories[i]; ++i)
+            cJSON_AddItemToArray(categories, cJSON_CreateString(entry.equity->categories[i]));
+        cJSON_AddNumberToObject(item, "score", floor(report.score * 10.0 + 0.5) / 10.0);
+        cJSON_AddStringToObject(item, "class", ScoreClassName(report.scoreClass));
+        cJSON_AddStringToObject(item, "class_range", ScoreClassRange(report.scoreClass));
+        cJSON_AddNumberToObject(item, "rebound", report.rebound);
+        cJSON_AddNumberToObject(item, "streak", report.streak.streak);
+        cJSON_AddBoolToObject(item, "alert", report.streak.streak >= 2);
+        cJSON_AddStringToObject(item, "currency", chart.currency);
+        cJSON_AddNumberToObject(item, "close", prices.close);
+        cJSON_AddNumberToObject(item, "change", prices.change);
+        cJSON_AddNumberToObject(item, "change_pct", prices.changePct);
+        if (prices.spanDays > 0)
+        {
+            cJSON_AddNumberToObject(item, "span_days", prices.spanDays);
+            cJSON_AddNumberToObject(item, "span_change", prices.spanChange);
+            cJSON_AddNumberToObject(item, "span_pct", prices.spanPct);
+        }
+        else
+        {
+            cJSON_AddNullToObject(item, "span_days");
+            cJSON_AddNullToObject(item, "span_change");
+            cJSON_AddNullToObject(item, "span_pct");
+        }
+        cJSON_AddBoolToObject(item, "session_in_progress", report.intraday);
+    }
+
+    cJSON* notScored = cJSON_AddArrayToObject(root, "not_scored");
+    for (int i = 0; i < EQUITY_COUNT; ++i)
+    {
+        if (entries[i].scored)
+            continue;
+        cJSON* item = cJSON_CreateObject();
+        cJSON_AddItemToArray(notScored, item);
+        cJSON_AddStringToObject(item, "symbol", entries[i].equity->symbol);
+        cJSON_AddStringToObject(item, "problem", entries[i].problem);
+    }
+
+    char* text = cJSON_Print(root);
+    cJSON_Delete(root);
+    if (!text)
+    {
+        strncpy_s(error, errorSize, "out of memory", _TRUNCATE);
+        return false;
+    }
+
+    FILE* f = nullptr;
+    errno_t err = _wfopen_s(&f, path, L"wb");
+    if (err != 0 || !f)
+    {
+        _snprintf_s(error, errorSize, _TRUNCATE, "cannot create the file (errno %d)", err);
+        cJSON_free(text);
+        return false;
+    }
+    size_t length  = strlen(text);
+    bool   written = fwrite(text, 1, length, f) == length && fwrite("\n", 1, 1, f) == 1;
+    written = fclose(f) == 0 && written;
+    cJSON_free(text);
+    if (!written)
+        strncpy_s(error, errorSize, "cannot write the file", _TRUNCATE);
+    return written;
+}
+
 // Fetches every ticker of EQUITIES, then prints them sorted by score (best
 // first) and grouped by class, and updates the storage once at the end.
-// A ticker that fails keeps its stored record. Returns the number of
-// tickers that failed.
-static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool save)
+// A ticker that fails keeps its stored record. When jsonPath is not nullptr,
+// the result is also written there as JSON. Returns the number of tickers
+// that failed.
+static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool save, const wchar_t* jsonPath)
 {
     char error[256];
     Storage storage;
@@ -794,6 +892,14 @@ static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool s
     printf("--- %d stocks, %d alert(s), %d failed, %llu s ---\n", EQUITY_COUNT, alerts, failures,
            (GetTickCount64() - startTick) / 1000);
 
+    if (jsonPath)
+    {
+        if (WriteScanJson(jsonPath, entries, order, orderCount, alerts, failures, error, _countof(error)))
+            printf("Wrote %ls\n", jsonPath);
+        else
+            printf("Warning: cannot write %ls: %s\n", jsonPath, error);
+    }
+
     if (storageOk && save && scored > 0)
     {
         if (SaveStorage(storagePath, storage, error, _countof(error)))
@@ -843,7 +949,7 @@ static void PrintUsage()
     printf("wp81Equities - Euronext daily scan with Yahoo Finance data\n");
     printf("\n");
     printf("Usage:\n");
-    printf("  wp81Equities.exe [-s FILE] [-n] [-k | -u]\n");
+    printf("  wp81Equities.exe [-s FILE] [-n] [-j FILE] [-k | -u]\n");
     printf("      scan all %d tracked tickers, sorted by short-term score\n", EQUITY_COUNT);
     printf("  wp81Equities.exe [-s FILE] [-n] [-o FILE] [-k | -u] TICKER | URL\n");
     printf("      show one ticker in detail\n");
@@ -861,6 +967,7 @@ static void PrintUsage()
     printf("Options:\n");
     printf("  -s FILE     use FILE as the storage instead of %ls\n", STORAGE_FILE_NAME);
     printf("  -n          do not update the storage\n");
+    printf("  -j FILE     scan: also write the ranked list to FILE as JSON\n");
     printf("  -o FILE     save the response body to FILE\n");
     printf("  -i FILE     parse a saved response instead of fetching\n");
     printf("  -k          ignore all certificate errors (diagnosis only, unsafe)\n");
@@ -879,6 +986,7 @@ static void PrintUsage()
     printf("\n");
     printf("Examples:\n");
     printf("  wp81Equities.exe\n");
+    printf("  wp81Equities.exe -j scan.json\n");
     printf("  wp81Equities.exe AIR.PA\n");
     printf("  wp81Equities.exe -o airbus.json AIR.PA\n");
     printf("  wp81Equities.exe -n -i airbus.json\n");
@@ -1021,6 +1129,7 @@ int wmain(int argc, wchar_t* argv[])
     ULONGLONG      certIgnoreFlags = 0;   // XHR_CERT_IGNORE_* bitmask
     bool           diagnose        = false;
     const wchar_t* outFile         = nullptr;
+    const wchar_t* jsonFile        = nullptr;
     const wchar_t* inFile          = nullptr;
     const wchar_t* storageFile     = nullptr;
     bool           save            = true;
@@ -1036,6 +1145,8 @@ int wmain(int argc, wchar_t* argv[])
             diagnose = true;
         else if (wcscmp(argv[i], L"-o") == 0 && i + 1 < argc)
             outFile = argv[++i];
+        else if (wcscmp(argv[i], L"-j") == 0 && i + 1 < argc)
+            jsonFile = argv[++i];
         else if (wcscmp(argv[i], L"-i") == 0 && i + 1 < argc)
             inFile = argv[++i];
         else if (wcscmp(argv[i], L"-s") == 0 && i + 1 < argc)
@@ -1049,7 +1160,8 @@ int wmain(int argc, wchar_t* argv[])
         }
         else if (argv[i][0] == L'-')
         {
-            if (wcscmp(argv[i], L"-o") == 0 || wcscmp(argv[i], L"-i") == 0 || wcscmp(argv[i], L"-s") == 0)
+            if (wcscmp(argv[i], L"-o") == 0 || wcscmp(argv[i], L"-i") == 0 || wcscmp(argv[i], L"-s") == 0 ||
+                wcscmp(argv[i], L"-j") == 0)
                 printf("Option %ls needs a file name.\n\n", argv[i]);
             else
                 printf("Unknown option: %ls\n\n", argv[i]);
@@ -1063,6 +1175,13 @@ int wmain(int argc, wchar_t* argv[])
     if (outFile && !target)
     {
         printf("Option -o needs a TICKER or URL.\n\n");
+        PrintUsage();
+        return 2;
+    }
+
+    if (jsonFile && (target || inFile || diagnose))
+    {
+        printf("Option -j is only for a full scan.\n\n");
         PrintUsage();
         return 2;
     }
@@ -1095,7 +1214,7 @@ int wmain(int argc, wchar_t* argv[])
     if (!target && !diagnose)
     {
         PrintIgnoredCertificateChecks(certIgnoreFlags);
-        int failures = ScanAll(certIgnoreFlags, storagePath, save);
+        int failures = ScanAll(certIgnoreFlags, storagePath, save, jsonFile);
         CoUninitialize();
         return failures ? 1 : 0;
     }
