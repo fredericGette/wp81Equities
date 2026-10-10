@@ -79,12 +79,12 @@ Exit codes: `0` success, `1` failure (scan: at least one ticker failed),
   "stocks": 54,
   "alerts": 3,
   "failed": 1,
-  "ranked": [
+  "held": [
     {
       "rank": 1,
       "symbol": "AIR.PA",
       "name": "Airbus SE",
-      "categories": ["Aerospace", "Defense"],
+      "categories": ["aerospace", "defense"],
       "group": "HELD: GAIN, UP TODAY",
       "app": 172.4,
       "gain": 24.1,
@@ -105,6 +105,28 @@ Exit codes: `0` success, `1` failure (scan: at least one ticker failed),
       "session_in_progress": false
     }
   ],
+  "ranked": [
+    {
+      "rank": 1,
+      "symbol": "SU.PA",
+      "name": "Schneider Electric S.E.",
+      "categories": ["energy management", "electricals", "industrials"],
+      "score": 78.4,
+      "class": "STRONG SHORT-TERM",
+      "class_range": "75+",
+      "rebound": 20,
+      "streak": 3,
+      "alert": true,
+      "currency": "EUR",
+      "close": 266.4,
+      "change": 5.3,
+      "change_pct": 2.03,
+      "span_days": 4,
+      "span_change": -6.4,
+      "span_pct": -2.35,
+      "session_in_progress": false
+    }
+  ],
   "not_scored": [
     { "symbol": "XYZ.PA", "problem": "WARNING: XYZ.PA: no market data available" }
   ]
@@ -122,22 +144,24 @@ Top level:
 | `stocks`     | number | tickers in the scan (the records of the storage file)          |
 | `alerts`     | number | scored tickers with an up-day streak of 2 or more              |
 | `failed`     | number | tickers that could not be scored (listed in `not_scored`)      |
-| `ranked`     | array  | scored tickers, by `group` then by score, best first (see below) |
+| `held`       | array  | scored tickers with an `app`, by `group` then by score (see below) |
+| `ranked`     | array  | the other scored tickers, sorted by score, best first (see below) |
 | `not_scored` | array  | tickers that could not be scored, in storage file order        |
 
-Each entry of `ranked`:
+Each entry of `held` and `ranked` (`group`, `app`, `gain` and `gain_pct`
+only in `held`):
 
 | Property              | Type           | Meaning                                                                 |
 |-----------------------|----------------|-------------------------------------------------------------------------|
-| `rank`                | number         | position in the list, from 1; ties keep the storage file order          |
+| `rank`                | number         | position in its array, from 1; ties keep the storage file order         |
 | `symbol`              | string         | Yahoo Finance symbol, e.g. `AIR.PA`                                     |
 | `name`                | string         | company name from Yahoo (long name, else short name, else symbol)       |
 | `categories`          | array          | categories from the storage file (up to 8)                              |
-| `group`               | string         | first sort key: `HELD: GAIN, UP TODAY`, `HELD: LOSS, UP TODAY`, `HELD: FLAT OR DOWN TODAY`, `NOT HELD` |
-| `app`                 | number or null | Average Purchase Price from the storage file, `null` when not held      |
-| `gain`                | number or null | `close` minus `app` (negative: loss), per share                         |
-| `gain_pct`            | number or null | `gain` in percent of `app`                                              |
-| `score`               | number         | short-term momentum score, 0-100: the sort key within a group           |
+| `group`               | string         | `held` only, first sort key: `HELD: GAIN, UP TODAY`, `HELD: LOSS, UP TODAY`, `HELD: FLAT OR DOWN TODAY` |
+| `app`                 | number         | `held` only: Average Purchase Price from the storage file               |
+| `gain`                | number         | `held` only: `close` minus `app` (negative: loss), per share            |
+| `gain_pct`            | number         | `held` only: `gain` in percent of `app`                                 |
+| `score`               | number         | short-term momentum score, 0-100: the sort key (within a group in `held`) |
 | `class`               | string         | score class: `STRONG SHORT-TERM`, `INTERESTING`, `WATCH`, `NEUTRAL`, `WEAK` |
 | `class_range`         | string         | score range of the class: `75+`, `65-75`, `55-65`, `45-55`, `<45`       |
 | `rebound`             | number         | rebound score, 20-95: high after a large multi-day fall, more when today is up; not used to sort |

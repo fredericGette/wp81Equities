@@ -648,9 +648,10 @@ static void PrintScanLine(const ScanEntry& entry)
                chart.currency, prices.changePct, span, position, inProgress);
 }
 
-// Same content as the console output of a scan: the scored tickers in rank
-// order (order[0..orderCount-1] index entries), then the ones not scored.
-// Values are rounded as printed. Returns false with the reason in error.
+// Same content as the console output of a scan: the held tickers, then the
+// other scored ones, each in rank order (order[0..orderCount-1] index entries,
+// held ones first), then the ones not scored. Values are rounded as printed.
+// Returns false with the reason in error.
 static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, int entryCount, const int* order,
                           int orderCount, int alerts, int failures, char* error, size_t errorSize)
 {
@@ -666,7 +667,9 @@ static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, int ent
     cJSON_AddNumberToObject(root, "alerts", alerts);
     cJSON_AddNumberToObject(root, "failed", failures);
 
+    cJSON* held   = cJSON_AddArrayToObject(root, "held");
     cJSON* ranked = cJSON_AddArrayToObject(root, "ranked");
+    int    heldCount = 0;
     for (int k = 0; k < orderCount; ++k)
     {
         const ScanEntry&    entry  = entries[order[k]];
@@ -675,25 +678,27 @@ static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, int ent
         const PriceSummary& prices = report.prices;
 
         cJSON* item = cJSON_CreateObject();
-        cJSON_AddItemToArray(ranked, item);
-        cJSON_AddNumberToObject(item, "rank", k + 1);
+        if (report.held)
+        {
+            cJSON_AddItemToArray(held, item);
+            cJSON_AddNumberToObject(item, "rank", ++heldCount);
+        }
+        else
+        {
+            cJSON_AddItemToArray(ranked, item);
+            cJSON_AddNumberToObject(item, "rank", k + 1 - heldCount);
+        }
         cJSON_AddStringToObject(item, "symbol", entry.stored->symbol);
         cJSON_AddStringToObject(item, "name", chart.name);
         cJSON* categories = cJSON_AddArrayToObject(item, "categories");
         for (int i = 0; i < entry.stored->categoryCount; ++i)
             cJSON_AddItemToArray(categories, cJSON_CreateString(entry.stored->categories[i]));
-        cJSON_AddStringToObject(item, "group", RankGroupName(report.group));
         if (report.held)
         {
+            cJSON_AddStringToObject(item, "group", RankGroupName(report.group));
             cJSON_AddNumberToObject(item, "app", report.app);
             cJSON_AddNumberToObject(item, "gain", report.position.gain);
             cJSON_AddNumberToObject(item, "gain_pct", report.position.gainPct);
-        }
-        else
-        {
-            cJSON_AddNullToObject(item, "app");
-            cJSON_AddNullToObject(item, "gain");
-            cJSON_AddNullToObject(item, "gain_pct");
         }
         cJSON_AddNumberToObject(item, "score", floor(report.score * 10.0 + 0.5) / 10.0);
         cJSON_AddStringToObject(item, "class", ScoreClassName(report.scoreClass));
