@@ -9,10 +9,15 @@
 //         "streak": 1,
 //         "name": "Airbus SE",
 //         "last_update": "2026-10-02",
-//         "categories": [ "aerospace", "defense", "aviation" ]
+//         "categories": [ "aerospace", "defense", "aviation" ],
+//         "app": 172.4                                                    (optional)
 //     },
+//     "NEW.PA": { "categories": [ "industrials" ] },                     (added by hand)
 //     ...
 // }
+// The file is the list of tracked tickers: a record added by hand needs
+// only "categories"; the other properties are filled by the next scan.
+// "app" is the Average Purchase Price of a held equity, set by hand.
 // Legacy records with "last_close" instead of "history" are migrated on load.
 
 static const int STORED_HISTORY_MAX    = 32;
@@ -34,6 +39,8 @@ struct StoredTicker
     int         historyCount;
     char        categories[STORED_CATEGORIES_MAX][48];
     int         categoryCount;
+    bool        hasApp;            // "app" present
+    double      app;               // Average Purchase Price
 };
 
 struct Storage

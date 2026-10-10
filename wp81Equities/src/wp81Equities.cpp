@@ -5,13 +5,14 @@
  * architecture ARM 32bit little endian.
  * Use secure functions when possible, example: _snprintf_s instead of _snprintf
  *
- * Port of euronext_tracker.py: for each ticker of EQUITIES (equities.cpp),
- * fetch the Yahoo Finance daily chart over HTTPS with MSXML6
- * IXMLHTTPRequest2, parse it with cJSON and print the last close, daily
- * change, multi-day change and up-day streak (ALERT from 2 days). The
- * streak is continued from euronext_storage.json (same file and format as
- * the Python script), which is then updated. The scan is sorted by a
- * short-term momentum score (tracker.cpp, ComputeScore) and grouped by
+ * Port of euronext_tracker.py: for each ticker of euronext_storage.json
+ * (same file and format as the Python script), fetch the Yahoo Finance
+ * daily chart over HTTPS with MSXML6 IXMLHTTPRequest2, parse it with cJSON
+ * and print the last close, daily change, multi-day change and up-day
+ * streak (ALERT from 2 days). The streak is continued from the storage,
+ * which is then updated. Held equities (with an Average Purchase Price,
+ * "app") are listed first with their gain or loss; the others are sorted by
+ * a short-term momentum score (tracker.cpp, ComputeScore) and grouped by
  * class. Plain ASCII output: no ANSI colors, no emoji. A single ticker can
  * also be shown in detail.
  *
@@ -55,7 +56,6 @@
 #include "yahoo_chart.h"
 #include "tracker.h"
 #include "storage.h"
-#include "equities.h"
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 static const wchar_t* DEFAULT_TICKER     = L"AIR.PA";
@@ -422,6 +422,10 @@ struct TickerReport
     double       score;      // ComputeScore(), 0 to 100
     ScoreClass   scoreClass;
     int          rebound;    // ComputeReboundScore(), 20 to 95
+    bool         held;       // the stored record has an "app"
+    double       app;        // Average Purchase Price, when held
+    Position     position;   // gain vs app, when held
+    RankGroup    group;
 };
 
 // Continues the stored streak (stored may be nullptr) with the chart's closes
@@ -436,21 +440,17 @@ static TickerReport AnalyzeChart(const ChartData& chart, const StoredTicker* sto
     report.score    = ComputeScore(report.prices.changePct, report.prices.spanPct, report.streak.streak);
     report.scoreClass = ClassifyScore(report.score);
     report.rebound    = ComputeReboundScore(report.prices.changePct, report.prices.spanPct);
+    report.held       = stored && stored->hasApp && stored->app > 0.0;
+    report.app        = report.held ? Round2(stored->app) : 0.0;
+    report.position   = report.held ? ComputePosition(report.prices.close, stored->app) : Position();
+    report.group      = ClassifyRank(report.held, report.position.gain, report.prices.change);
     return report;
 }
 
-static void UpdateStoredTicker(StoredTicker* stored, const ChartData& chart, const TickerReport& report,
-                               const Equity* equity)
+// Categories and "app" are set by hand in the storage: they are kept as is
+static void UpdateStoredTicker(StoredTicker* stored, const ChartData& chart, const TickerReport& report)
 {
     strncpy_s(stored->name, _countof(stored->name), chart.name, _TRUNCATE);
-    if (equity)
-    {
-        // Categories come from the EQUITIES table, as in the Python tracker
-        stored->categoryCount = 0;
-        for (int i = 0; i < EQUITY_MAX_CATEGORIES && equity->categories[i]; ++i)
-            strncpy_s(stored->categories[stored->categoryCount++], _countof(stored->categories[0]),
-                      equity->categories[i], _TRUNCATE);
-    }
 
     if (report.finished == 0 || report.streak.source == STREAK_STORAGE_NEWER)
         return;   // nothing new; never rewind the state to older data
@@ -476,6 +476,27 @@ static void FormatSpan(const ChartData& chart, const PriceSummary& prices, char*
     if (prices.spanDays > 0)
         _snprintf_s(out, outSize, _TRUNCATE, " | %dd: %+.2f %s / %+.2f%%", prices.spanDays,
                     prices.spanChange, chart.currency, prices.spanPct);
+}
+
+// " | APP 172.40: +24.10 EUR / +13.98%", or "" when not held
+static void FormatPosition(const ChartData& chart, const TickerReport& report, char* out, size_t outSize)
+{
+    out[0] = '\0';
+    if (report.held)
+        _snprintf_s(out, outSize, _TRUNCATE, " | APP %.2f: %+.2f %s / %+.2f%%", report.app,
+                    report.position.gain, chart.currency, report.position.gainPct);
+}
+
+// "aerospace | defense | aviation"
+static void FormatCategories(const StoredTicker& stored, char* out, size_t outSize)
+{
+    out[0] = '\0';
+    for (int i = 0; i < stored.categoryCount; ++i)
+    {
+        if (i > 0)
+            strncat_s(out, outSize, " | ", _TRUNCATE);
+        strncat_s(out, outSize, stored.categories[i], _TRUNCATE);
+    }
 }
 
 // ─── Single ticker (detailed) ────────────────────────────────────────────────
@@ -524,6 +545,10 @@ static void PrintChartDetails(const ChartData& chart, const TickerReport& report
                streak.streak >= 2 ? " day streak!" : "", streak.lastDate, basis);
     }
     printf("Score: %.1f (%s), rebound score: %d\n", report.score, ScoreClassName(report.scoreClass), report.rebound);
+    if (report.held)
+        printf("Held: average purchase price %.2f %s, %s %+.2f %s / %+.2f%%\n", report.app, chart.currency,
+               report.position.gain >= 0 ? "gain" : "loss", report.position.gain, chart.currency,
+               report.position.gainPct);
     if (report.intraday)
         printf("Today's session is in progress: its close will be counted on a later run.\n");
 }
@@ -561,15 +586,14 @@ static bool ShowTicker(const ByteBuffer& body, const wchar_t* storagePath, bool 
     TickerReport  report = AnalyzeChart(chart, stored);
     PrintChartDetails(chart, report);
 
+    // The storage is the list of tracked tickers: an untracked one is not added
     if (storageOk && save)
     {
         if (!stored)
-            stored = AddTicker(&storage, chart.symbol);
-        if (!stored)
-            printf("Warning: out of memory, %ls not updated.\n", storagePath);
+            printf("%s is not tracked in %ls: not saved.\n", chart.symbol, storagePath);
         else
         {
-            UpdateStoredTicker(stored, chart, report, FindEquity(chart.symbol));
+            UpdateStoredTicker(stored, chart, report);
             if (SaveStorage(storagePath, storage, error, _countof(error)))
                 printf("Saved to %ls\n", storagePath);
             else
@@ -587,51 +611,48 @@ static HRESULT Fetch(const wchar_t* url, ULONGLONG certIgnoreFlags, bool closeCo
 // One ticker of a scan: either scored, or the reason it could not be
 struct ScanEntry
 {
-    const Equity* equity;
-    bool          scored;
-    ChartData     chart;
-    TickerReport  report;
-    char          problem[192];   // "ERROR: ..." / "WARNING: ..." when not scored
+    const StoredTicker* stored;   // record of the storage: symbol, categories, app
+    bool                scored;
+    ChartData           chart;
+    TickerReport        report;
+    char                problem[192];   // "ERROR: ..." / "WARNING: ..." when not scored
 };
 
 // One line per ticker, two for an alert, prefixed with "[score / R rebound score]"
 static void PrintScanLine(const ScanEntry& entry)
 {
-    const Equity&       equity = *entry.equity;
+    const StoredTicker& stored = *entry.stored;
     const ChartData&    chart  = entry.chart;
     const TickerReport& report = entry.report;
 
-    char categories[160] = "";
-    for (int i = 0; i < EQUITY_MAX_CATEGORIES && equity.categories[i]; ++i)
-    {
-        if (i > 0)
-            strcat_s(categories, _countof(categories), " | ");
-        strcat_s(categories, _countof(categories), equity.categories[i]);
-    }
+    char categories[512];
+    FormatCategories(stored, categories, _countof(categories));
 
     const PriceSummary& prices = report.prices;
     char span[96];
     FormatSpan(chart, prices, span, _countof(span));
+    char position[96];
+    FormatPosition(chart, report, position, _countof(position));
     const char* inProgress = report.intraday ? " (session in progress)" : "";
 
     if (report.streak.streak >= 2)
     {
         printf("[%5.1f / R %2d] ALERT: %s (%s) [%s] - %d DAY STREAK!\n", report.score, report.rebound, chart.name,
-               equity.symbol, categories, report.streak.streak);
-        printf("                 Price: %.2f %s (%+.2f %s / %+.2f%%)%s%s\n", prices.close, chart.currency,
-               prices.change, chart.currency, prices.changePct, span, inProgress);
+               stored.symbol, categories, report.streak.streak);
+        printf("                 Price: %.2f %s (%+.2f %s / %+.2f%%)%s%s%s\n", prices.close, chart.currency,
+               prices.change, chart.currency, prices.changePct, span, position, inProgress);
     }
     else
-        printf("[%5.1f / R %2d] %s (%s) [%s]: %.2f %s (%+.2f %s / %+.2f%% today)%s%s\n", report.score,
-               report.rebound, chart.name, equity.symbol, categories, prices.close, chart.currency, prices.change,
-               chart.currency, prices.changePct, span, inProgress);
+        printf("[%5.1f / R %2d] %s (%s) [%s]: %.2f %s (%+.2f %s / %+.2f%% today)%s%s%s\n", report.score,
+               report.rebound, chart.name, stored.symbol, categories, prices.close, chart.currency, prices.change,
+               chart.currency, prices.changePct, span, position, inProgress);
 }
 
 // Same content as the console output of a scan: the scored tickers in rank
 // order (order[0..orderCount-1] index entries), then the ones not scored.
 // Values are rounded as printed. Returns false with the reason in error.
-static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, const int* order, int orderCount,
-                          int alerts, int failures, char* error, size_t errorSize)
+static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, int entryCount, const int* order,
+                          int orderCount, int alerts, int failures, char* error, size_t errorSize)
 {
     SYSTEMTIME now;
     GetSystemTime(&now);
@@ -641,7 +662,7 @@ static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, const i
 
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "generated", generated);
-    cJSON_AddNumberToObject(root, "stocks", EQUITY_COUNT);
+    cJSON_AddNumberToObject(root, "stocks", entryCount);
     cJSON_AddNumberToObject(root, "alerts", alerts);
     cJSON_AddNumberToObject(root, "failed", failures);
 
@@ -656,11 +677,24 @@ static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, const i
         cJSON* item = cJSON_CreateObject();
         cJSON_AddItemToArray(ranked, item);
         cJSON_AddNumberToObject(item, "rank", k + 1);
-        cJSON_AddStringToObject(item, "symbol", entry.equity->symbol);
+        cJSON_AddStringToObject(item, "symbol", entry.stored->symbol);
         cJSON_AddStringToObject(item, "name", chart.name);
         cJSON* categories = cJSON_AddArrayToObject(item, "categories");
-        for (int i = 0; i < EQUITY_MAX_CATEGORIES && entry.equity->categories[i]; ++i)
-            cJSON_AddItemToArray(categories, cJSON_CreateString(entry.equity->categories[i]));
+        for (int i = 0; i < entry.stored->categoryCount; ++i)
+            cJSON_AddItemToArray(categories, cJSON_CreateString(entry.stored->categories[i]));
+        cJSON_AddStringToObject(item, "group", RankGroupName(report.group));
+        if (report.held)
+        {
+            cJSON_AddNumberToObject(item, "app", report.app);
+            cJSON_AddNumberToObject(item, "gain", report.position.gain);
+            cJSON_AddNumberToObject(item, "gain_pct", report.position.gainPct);
+        }
+        else
+        {
+            cJSON_AddNullToObject(item, "app");
+            cJSON_AddNullToObject(item, "gain");
+            cJSON_AddNullToObject(item, "gain_pct");
+        }
         cJSON_AddNumberToObject(item, "score", floor(report.score * 10.0 + 0.5) / 10.0);
         cJSON_AddStringToObject(item, "class", ScoreClassName(report.scoreClass));
         cJSON_AddStringToObject(item, "class_range", ScoreClassRange(report.scoreClass));
@@ -687,13 +721,13 @@ static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, const i
     }
 
     cJSON* notScored = cJSON_AddArrayToObject(root, "not_scored");
-    for (int i = 0; i < EQUITY_COUNT; ++i)
+    for (int i = 0; i < entryCount; ++i)
     {
         if (entries[i].scored)
             continue;
         cJSON* item = cJSON_CreateObject();
         cJSON_AddItemToArray(notScored, item);
-        cJSON_AddStringToObject(item, "symbol", entries[i].equity->symbol);
+        cJSON_AddStringToObject(item, "symbol", entries[i].stored->symbol);
         cJSON_AddStringToObject(item, "problem", entries[i].problem);
     }
 
@@ -722,29 +756,44 @@ static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, const i
     return written;
 }
 
-// Fetches every ticker of EQUITIES, then prints them sorted by score (best
-// first) and grouped by class, and updates the storage once at the end.
-// A ticker that fails keeps its stored record. When jsonPath is not nullptr,
-// the result is also written there as JSON. Returns the number of tickers
-// that failed.
+// Fetches every ticker of the storage, then prints the held ones first (by
+// rank group, then score) and the others sorted by score (best first) and
+// grouped by class, and updates the storage once at the end. A ticker that
+// fails keeps its stored record. When jsonPath is not nullptr, the result is
+// also written there as JSON. Returns the number of tickers that failed (at
+// least 1 when there is nothing to scan).
 static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool save, const wchar_t* jsonPath)
 {
     char error[256];
     Storage storage;
     InitStorage(&storage);
-    bool storageOk = LoadStorage(storagePath, &storage, error, _countof(error));
-    if (!storageOk)
-        printf("Warning: cannot use %ls: %s. It will not be updated.\n", storagePath, error);
-
-    ScanEntry* entries = static_cast<ScanEntry*>(calloc(EQUITY_COUNT, sizeof(ScanEntry)));
-    if (!entries)
+    if (!LoadStorage(storagePath, &storage, error, _countof(error)))
     {
-        printf("Out of memory.\n");
+        printf("Cannot use %ls: %s.\n", storagePath, error);
+        return 1;
+    }
+    if (storage.count == 0)
+    {
+        printf("No ticker to scan: add them to %ls, e.g.\n", storagePath);
+        printf("  { \"AIR.PA\": { \"categories\": [ \"aerospace\" ] } }\n");
         FreeStorage(&storage);
-        return EQUITY_COUNT;
+        return 1;
     }
 
-    printf("--- Euronext Daily Scan (%d stocks) ---\n", EQUITY_COUNT);
+    // The storage only grows in AddTicker, never called below: pointers stay valid
+    const int  entryCount = storage.count;
+    ScanEntry* entries    = static_cast<ScanEntry*>(calloc(entryCount, sizeof(ScanEntry)));
+    int*       order      = static_cast<int*>(calloc(entryCount, sizeof(int)));
+    if (!entries || !order)
+    {
+        printf("Out of memory.\n");
+        free(entries);
+        free(order);
+        FreeStorage(&storage);
+        return entryCount;
+    }
+
+    printf("--- Euronext Daily Scan (%d stocks) ---\n", entryCount);
     printf("Fetching: ");
     fflush(stdout);
 
@@ -754,24 +803,24 @@ static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool s
     const char* stopReason   = nullptr;
     ULONGLONG   startTick    = GetTickCount64();
 
-    for (int i = 0; i < EQUITY_COUNT; ++i)
+    for (int i = 0; i < entryCount; ++i)
     {
         ScanEntry&    entry  = entries[i];
-        const Equity& equity = EQUITIES[i];
-        entry.equity = &equity;
+        StoredTicker& stored = storage.tickers[i];
+        entry.stored = &stored;
 
         if (stopReason)
         {
             _snprintf_s(entry.problem, _countof(entry.problem), _TRUNCATE, "ERROR: %s: not fetched (scan stopped)",
-                        equity.symbol);
+                        stored.symbol);
             ++failures;
             continue;
         }
 
         wchar_t symbol[32];   // tickers are ASCII
         int     length = 0;
-        for (; equity.symbol[length] && length < _countof(symbol) - 1; ++length)
-            symbol[length] = static_cast<wchar_t>(equity.symbol[length]);
+        for (; stored.symbol[length] && length < _countof(symbol) - 1; ++length)
+            symbol[length] = static_cast<wchar_t>(stored.symbol[length]);
         symbol[length] = L'\0';
 
         wchar_t url[256];
@@ -787,7 +836,7 @@ static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool s
             bool isCertError = false;
             const char* desc = DescribeError(hr, &isCertError);
             _snprintf_s(entry.problem, _countof(entry.problem), _TRUNCATE, "ERROR: %s: request failed: 0x%08lX %s",
-                        equity.symbol, hr, desc);
+                        stored.symbol, hr, desc);
             // Every other ticker would fail the same way; and each failed
             // connection takes seconds, so do not wait for all the others
             if (isCertError && !certIgnoreFlags)
@@ -802,32 +851,24 @@ static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool s
 
             if (callback->m_status == 429)
                 _snprintf_s(entry.problem, _countof(entry.problem), _TRUNCATE,
-                            "ERROR: %s: rate limited by Yahoo (HTTP 429)", equity.symbol);
+                            "ERROR: %s: rate limited by Yahoo (HTTP 429)", stored.symbol);
             else if (callback->m_body.size == 0)
                 _snprintf_s(entry.problem, _countof(entry.problem), _TRUNCATE, "ERROR: %s: empty response (HTTP %lu)",
-                            equity.symbol, callback->m_status);
+                            stored.symbol, callback->m_status);
             else if (!ParseChart(callback->m_body.data, &entry.chart, error, _countof(error)))
             {
                 if (strncmp(error, "no close price", 14) == 0)
                     _snprintf_s(entry.problem, _countof(entry.problem), _TRUNCATE,
-                                "WARNING: %s: no market data available", equity.symbol);
+                                "WARNING: %s: no market data available", stored.symbol);
                 else
-                    _snprintf_s(entry.problem, _countof(entry.problem), _TRUNCATE, "ERROR: %s: %s", equity.symbol, error);
+                    _snprintf_s(entry.problem, _countof(entry.problem), _TRUNCATE, "ERROR: %s: %s", stored.symbol, error);
             }
             else
             {
-                StoredTicker* stored = storageOk ? FindTicker(&storage, equity.symbol) : nullptr;
-                entry.report = AnalyzeChart(entry.chart, stored);
+                entry.report = AnalyzeChart(entry.chart, &stored);
                 entry.scored = true;
                 ++scored;
-
-                if (storageOk)
-                {
-                    if (!stored)
-                        stored = AddTicker(&storage, equity.symbol);
-                    if (stored)
-                        UpdateStoredTicker(stored, entry.chart, entry.report, &equity);
-                }
+                UpdateStoredTicker(&stored, entry.chart, entry.report);
             }
         }
         callback->Release();
@@ -845,62 +886,69 @@ static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool s
                strcmp(stopReason, "certificate problem") == 0 ? " A wrong phone clock is the usual cause."
                                                               : " Check the phone's network.");
 
-    // Stable sort of the scored tickers by score, best first (54 entries: insertion sort)
-    int order[256];
+    // Stable sort of the scored tickers by rank group, then by score, best
+    // first (a few dozen entries: insertion sort)
     int orderCount = 0;
-    for (int i = 0; i < EQUITY_COUNT && orderCount < _countof(order); ++i)
+    for (int i = 0; i < entryCount; ++i)
     {
         if (!entries[i].scored)
             continue;
+        const TickerReport& report = entries[i].report;
         int j = orderCount++;
-        while (j > 0 && entries[order[j - 1]].report.score < entries[i].report.score)
+        for (; j > 0; --j)
         {
+            const TickerReport& before = entries[order[j - 1]].report;
+            if (before.group < report.group || (before.group == report.group && before.score >= report.score))
+                break;
             order[j] = order[j - 1];
-            --j;
         }
         order[j] = i;
     }
 
     if (orderCount > 0)
-        printf("[score / R rebound score], sorted by score\n");
+        printf("[score / R rebound score], held equities first, then sorted by score\n");
 
     int alerts = 0;
+    int shownGroup = -1;
     int shownClass = -1;
     for (int k = 0; k < orderCount; ++k)
     {
-        const ScanEntry& entry = entries[order[k]];
-        if (entry.report.scoreClass != shownClass)
+        const TickerReport& report = entries[order[k]].report;
+        if (report.group != RANK_NOT_HELD && report.group != shownGroup)
+            printf("=== %s ===\n", RankGroupName(report.group));
+        else if (report.group == RANK_NOT_HELD && report.scoreClass != shownClass)
         {
-            shownClass = entry.report.scoreClass;
-            printf("=== %s (%s) ===\n", ScoreClassName(entry.report.scoreClass), ScoreClassRange(entry.report.scoreClass));
+            shownClass = report.scoreClass;
+            printf("=== %s (%s) ===\n", ScoreClassName(report.scoreClass), ScoreClassRange(report.scoreClass));
         }
-        PrintScanLine(entry);
-        if (entry.report.streak.streak >= 2)
+        shownGroup = report.group;
+        PrintScanLine(entries[order[k]]);
+        if (report.streak.streak >= 2)
             ++alerts;
     }
 
     if (failures > 0)
     {
         printf("=== NOT SCORED ===\n");
-        for (int i = 0; i < EQUITY_COUNT; ++i)
+        for (int i = 0; i < entryCount; ++i)
         {
             if (!entries[i].scored)
                 printf("%s\n", entries[i].problem);
         }
     }
 
-    printf("--- %d stocks, %d alert(s), %d failed, %llu s ---\n", EQUITY_COUNT, alerts, failures,
+    printf("--- %d stocks, %d alert(s), %d failed, %llu s ---\n", entryCount, alerts, failures,
            (GetTickCount64() - startTick) / 1000);
 
     if (jsonPath)
     {
-        if (WriteScanJson(jsonPath, entries, order, orderCount, alerts, failures, error, _countof(error)))
+        if (WriteScanJson(jsonPath, entries, entryCount, order, orderCount, alerts, failures, error, _countof(error)))
             printf("Wrote %ls\n", jsonPath);
         else
             printf("Warning: cannot write %ls: %s\n", jsonPath, error);
     }
 
-    if (storageOk && save && scored > 0)
+    if (save && scored > 0)
     {
         if (SaveStorage(storagePath, storage, error, _countof(error)))
             printf("Saved to %ls\n", storagePath);
@@ -908,6 +956,7 @@ static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool s
             printf("Warning: cannot save %ls: %s\n", storagePath, error);
     }
 
+    free(order);
     free(entries);
     FreeStorage(&storage);
     return failures;
@@ -950,7 +999,7 @@ static void PrintUsage()
     printf("\n");
     printf("Usage:\n");
     printf("  wp81Equities.exe [-s FILE] [-n] [-j FILE] [-k | -u]\n");
-    printf("      scan all %d tracked tickers, sorted by short-term score\n", EQUITY_COUNT);
+    printf("      scan all tickers of the storage: held ones first, then by score\n");
     printf("  wp81Equities.exe [-s FILE] [-n] [-o FILE] [-k | -u] TICKER | URL\n");
     printf("      show one ticker in detail\n");
     printf("  wp81Equities.exe [-s FILE] [-n] -i FILE\n");
@@ -979,8 +1028,13 @@ static void PrintUsage()
     printf("SHORT-TERM 75+, INTERESTING 65+, WATCH 55+, NEUTRAL 45+, WEAK.\n");
     printf("Rebound score (R, 20-95, shown beside the score, not used to sort):\n");
     printf("high after a large 4-day fall, more when today is up.\n");
-    printf("The up-day streak (ALERT from 2 days) is continued from %ls,\n", STORAGE_FILE_NAME);
-    printf("next to the exe, same file and format as euronext_tracker.py.\n");
+    printf("The tickers scanned are the ones of %ls, next to the exe,\n", STORAGE_FILE_NAME);
+    printf("same file and format as euronext_tracker.py. To add one by hand:\n");
+    printf("  \"AIR.PA\": { \"categories\": [ \"aerospace\" ], \"app\": 172.4 }\n");
+    printf("\"app\" (optional) is the Average Purchase Price of a held equity:\n");
+    printf("its gain or loss is shown and it is listed first, gains up today,\n");
+    printf("then losses up today, then the ones flat or down today.\n");
+    printf("The up-day streak (ALERT from 2 days) is continued from the storage.\n");
     printf("Certificate errors are usually caused by a wrong phone clock:\n");
     printf("check the date and time in Settings first.\n");
     printf("\n");
@@ -1133,7 +1187,7 @@ int wmain(int argc, wchar_t* argv[])
     const wchar_t* inFile          = nullptr;
     const wchar_t* storageFile     = nullptr;
     bool           save            = true;
-    const wchar_t* target          = nullptr;   // nullptr: scan every ticker of EQUITIES
+    const wchar_t* target          = nullptr;   // nullptr: scan every ticker of the storage
 
     for (int i = 1; i < argc; ++i)
     {

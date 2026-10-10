@@ -106,6 +106,10 @@ static bool LoadTicker(const cJSON* item, StoredTicker* ticker, char* error, siz
         if (ticker->categoryCount < STORED_CATEGORIES_MAX && cJSON_IsString(category))
             CopyJsonString(category, ticker->categories[ticker->categoryCount++], _countof(ticker->categories[0]));
     }
+
+    const cJSON* app = cJSON_GetObjectItemCaseSensitive(item, "app");
+    ticker->hasApp = cJSON_IsNumber(app);
+    ticker->app    = ticker->hasApp ? app->valuedouble : 0.0;
     return true;
 }
 
@@ -143,10 +147,28 @@ bool LoadStorage(const wchar_t* path, Storage* storage, char* error, size_t erro
     if (content.size >= 3 && memcmp(text, "\xEF\xBB\xBF", 3) == 0)
         text += 3;   // UTF-8 BOM
 
-    cJSON* root = cJSON_Parse(text);
+    const char* parseEnd = nullptr;
+    cJSON* root = cJSON_ParseWithOpts(text, &parseEnd, false);
+    if (!root)
+    {
+        // Line and column of the parse error, for a file edited by hand
+        int line = 1, column = 1;
+        for (const char* p = text; parseEnd && p < parseEnd && *p; ++p)
+        {
+            if (*p == '\n')
+            {
+                ++line;
+                column = 1;
+            }
+            else
+                ++column;
+        }
+        _snprintf_s(error, errorSize, _TRUNCATE, "invalid JSON at line %d, column %d (missing comma?)", line, column);
+        return false;
+    }
     if (!cJSON_IsObject(root))
     {
-        strncpy_s(error, errorSize, root ? "the top level is not a JSON object" : "invalid JSON", _TRUNCATE);
+        strncpy_s(error, errorSize, "the top level is not a JSON object", _TRUNCATE);
         cJSON_Delete(root);
         return false;
     }
@@ -329,6 +351,14 @@ static void WriteTicker(ByteBuffer* out, const StoredTicker& ticker)
         }
         WriteIndent(out, 2);
         out->Append("]");
+    }
+
+    if (ticker.hasApp)
+    {
+        out->Append(",\n");
+        WriteIndent(out, 2);
+        out->Append("\"app\": ");
+        WriteFloat(out, ticker.app);
     }
     out->Append("\n");
     WriteIndent(out, 1);

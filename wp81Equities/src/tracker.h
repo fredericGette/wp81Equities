@@ -46,6 +46,30 @@ ScoreClass  ClassifyScore(double score);
 const char* ScoreClassName(ScoreClass scoreClass);    // e.g. "STRONG SHORT-TERM"
 const char* ScoreClassRange(ScoreClass scoreClass);   // e.g. "75+"
 
+// Gain (negative: loss) of the last close vs the Average Purchase Price, per share
+struct Position
+{
+    double gain;
+    double gainPct;   // in percent of app
+};
+
+// close and app > 0; values rounded to 2 decimals
+Position ComputePosition(double close, double app);
+
+// Scan order: held equities (with an "app") first, then the others by score.
+// Within a group, the order is by score.
+enum RankGroup
+{
+    RANK_HELD_GAIN_UP,     // gain (or break-even) and up today
+    RANK_HELD_LOSS_UP,     // loss and up today
+    RANK_HELD_OTHER,       // flat or down today
+    RANK_NOT_HELD,         // no "app": grouped by score class
+    RANK_GROUP_COUNT
+};
+
+RankGroup   ClassifyRank(bool held, double gain, double changeToday);
+const char* RankGroupName(RankGroup group);   // e.g. "HELD: GAIN, UP TODAY"
+
 enum StreakSource
 {
     STREAK_CONTINUED,       // stored streak continued with the newer closes

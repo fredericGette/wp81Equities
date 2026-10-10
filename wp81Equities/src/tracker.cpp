@@ -105,6 +105,31 @@ const char* ScoreClassRange(ScoreClass scoreClass)
     return RANGES[scoreClass];
 }
 
+Position ComputePosition(double close, double app)
+{
+    Position position;
+    double   price   = Round2(app);
+    position.gain    = Round2(Round2(close) - price);
+    position.gainPct = price != 0.0 ? Round2(position.gain / price * 100.0) : 0.0;
+    return position;
+}
+
+RankGroup ClassifyRank(bool held, double gain, double changeToday)
+{
+    if (!held)
+        return RANK_NOT_HELD;
+    if (changeToday <= 0)
+        return RANK_HELD_OTHER;
+    return gain >= 0 ? RANK_HELD_GAIN_UP : RANK_HELD_LOSS_UP;
+}
+
+const char* RankGroupName(RankGroup group)
+{
+    static const char* NAMES[RANK_GROUP_COUNT] = { "HELD: GAIN, UP TODAY", "HELD: LOSS, UP TODAY",
+                                                   "HELD: FLAT OR DOWN TODAY", "NOT HELD" };
+    return NAMES[group];
+}
+
 static void ApplyCloses(StreakResult* result, const DailyClose* closes, int from, int count)
 {
     for (int i = from; i < count; ++i)

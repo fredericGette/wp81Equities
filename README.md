@@ -15,8 +15,12 @@ phone telnet session.
 
 ## Features
 
-- Full scan of the tracked tickers (see `src/equities.cpp`), sorted by score
-  and grouped into classes:
+- Full scan of the tickers listed in `euronext_storage.json` (see
+  [Adding or removing tickers](#adding-or-removing-tickers)).
+- Held equities (with an Average Purchase Price, `app`) are listed first,
+  with their gain or loss vs the last close: gains up today, then losses up
+  today, then the ones flat or down today (each group sorted by score).
+- The other tickers are sorted by score and grouped into classes:
   STRONG SHORT-TERM (75+), INTERESTING (65+), WATCH (55+), NEUTRAL (45+), WEAK.
 - Rebound score (R, 20-95) shown beside the main score: high after a large
   4-day fall, higher still when today is up. It does not affect sorting.
@@ -81,6 +85,10 @@ Exit codes: `0` success, `1` failure (scan: at least one ticker failed),
       "symbol": "AIR.PA",
       "name": "Airbus SE",
       "categories": ["Aerospace", "Defense"],
+      "group": "HELD: GAIN, UP TODAY",
+      "app": 172.4,
+      "gain": 24.1,
+      "gain_pct": 13.98,
       "score": 78.4,
       "class": "STRONG SHORT-TERM",
       "class_range": "75+",
@@ -111,21 +119,25 @@ Top level:
 | Property     | Type   | Meaning                                                        |
 |--------------|--------|----------------------------------------------------------------|
 | `generated`  | string | time the file was written, UTC, ISO 8601 (phone clock)         |
-| `stocks`     | number | tickers in the scan (the `EQUITIES` table)                     |
+| `stocks`     | number | tickers in the scan (the records of the storage file)          |
 | `alerts`     | number | scored tickers with an up-day streak of 2 or more              |
 | `failed`     | number | tickers that could not be scored (listed in `not_scored`)      |
-| `ranked`     | array  | scored tickers, sorted by score, best first (see below)        |
-| `not_scored` | array  | tickers that could not be scored, in `EQUITIES` order          |
+| `ranked`     | array  | scored tickers, by `group` then by score, best first (see below) |
+| `not_scored` | array  | tickers that could not be scored, in storage file order        |
 
 Each entry of `ranked`:
 
 | Property              | Type           | Meaning                                                                 |
 |-----------------------|----------------|-------------------------------------------------------------------------|
-| `rank`                | number         | position in the list, from 1; ties keep the `EQUITIES` order            |
+| `rank`                | number         | position in the list, from 1; ties keep the storage file order          |
 | `symbol`              | string         | Yahoo Finance symbol, e.g. `AIR.PA`                                     |
 | `name`                | string         | company name from Yahoo (long name, else short name, else symbol)       |
-| `categories`          | array          | categories from the `EQUITIES` table (up to 3)                          |
-| `score`               | number         | short-term momentum score, 0-100: the sort key                          |
+| `categories`          | array          | categories from the storage file (up to 8)                              |
+| `group`               | string         | first sort key: `HELD: GAIN, UP TODAY`, `HELD: LOSS, UP TODAY`, `HELD: FLAT OR DOWN TODAY`, `NOT HELD` |
+| `app`                 | number or null | Average Purchase Price from the storage file, `null` when not held      |
+| `gain`                | number or null | `close` minus `app` (negative: loss), per share                         |
+| `gain_pct`            | number or null | `gain` in percent of `app`                                              |
+| `score`               | number         | short-term momentum score, 0-100: the sort key within a group           |
 | `class`               | string         | score class: `STRONG SHORT-TERM`, `INTERESTING`, `WATCH`, `NEUTRAL`, `WEAK` |
 | `class_range`         | string         | score range of the class: `75+`, `65-75`, `55-65`, `45-55`, `<45`       |
 | `rebound`             | number         | rebound score, 20-95: high after a large multi-day fall, more when today is up; not used to sort |
@@ -207,7 +219,6 @@ wp81Equities/
   CMakePresets.json     arm32-windows preset (clang-cl, lld-link, Ninja)
   src/
     wp81Equities.cpp    entry point, HTTP requests, scan and display
-    equities.cpp/.h     list of tracked tickers and their categories
     yahoo_chart.cpp/.h  parsing of the Yahoo Finance chart JSON
     tracker.cpp/.h      price summary, streak, score and rebound score
     storage.cpp/.h      reading and writing euronext_storage.json
@@ -220,6 +231,18 @@ and parsing logic can also be compiled and tested on a PC.
 
 ## Adding or removing tickers
 
-Edit the `EQUITIES` table in `src/equities.cpp`. Each entry is a Yahoo
-Finance symbol (e.g. `AIR.PA`, `ABN.AS`, `DEME.BR`) with up to three
-categories. Rebuild afterwards.
+The scanned tickers are the records of `euronext_storage.json` (next to the
+exe, or the file given with `-s`). Edit it by hand; no rebuild is needed.
+Each key is a Yahoo Finance symbol (e.g. `AIR.PA`, `ABN.AS`, `DEME.BR`). A new
+record only needs its categories; the scan fills in the other properties:
+
+```json
+{
+    "NEW.PA": { "categories": [ "industrials", "small cap" ] },
+    "AIR.PA": { "categories": [ "aerospace", "defense" ], "app": 172.4 }
+}
+```
+
+`app` (optional) is the Average Purchase Price of a held equity. The scan
+keeps `categories` and `app` as they are. To stop tracking a ticker, delete
+its record. Showing a single ticker that is not in the file does not add it.
