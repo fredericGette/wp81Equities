@@ -765,7 +765,7 @@ static bool WriteScanJson(const wchar_t* path, const ScanEntry* entries, int ent
 // rank group, then score) and the others sorted by score (best first) and
 // grouped by class, and updates the storage once at the end. A ticker that
 // fails keeps its stored record. When jsonPath is not nullptr, the result is
-// also written there as JSON. Returns the number of tickers that failed (at
+// written there as JSON instead of being printed. Returns the number of tickers that failed (at
 // least 1 when there is nothing to scan).
 static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool save, const wchar_t* jsonPath)
 {
@@ -910,7 +910,9 @@ static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool s
         order[j] = i;
     }
 
-    if (orderCount > 0)
+    // With a JSON file, the equities are only written there, not printed
+    const bool printEquities = jsonPath == nullptr;
+    if (printEquities && orderCount > 0)
         printf("[score / R rebound score], held equities first, then sorted by score\n");
 
     int alerts = 0;
@@ -919,6 +921,10 @@ static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool s
     for (int k = 0; k < orderCount; ++k)
     {
         const TickerReport& report = entries[order[k]].report;
+        if (report.streak.streak >= 2)
+            ++alerts;
+        if (!printEquities)
+            continue;
         if (report.group != RANK_NOT_HELD && report.group != shownGroup)
             printf("=== %s ===\n", RankGroupName(report.group));
         else if (report.group == RANK_NOT_HELD && report.scoreClass != shownClass)
@@ -928,8 +934,6 @@ static int ScanAll(ULONGLONG certIgnoreFlags, const wchar_t* storagePath, bool s
         }
         shownGroup = report.group;
         PrintScanLine(entries[order[k]]);
-        if (report.streak.streak >= 2)
-            ++alerts;
     }
 
     if (failures > 0)
@@ -1021,7 +1025,7 @@ static void PrintUsage()
     printf("Options:\n");
     printf("  -s FILE     use FILE as the storage instead of %ls\n", STORAGE_FILE_NAME);
     printf("  -n          do not update the storage\n");
-    printf("  -j FILE     scan: also write the ranked list to FILE as JSON\n");
+    printf("  -j FILE     scan: write the ranked list to FILE as JSON instead of printing it\n");
     printf("  -o FILE     save the response body to FILE\n");
     printf("  -i FILE     parse a saved response instead of fetching\n");
     printf("  -k          ignore all certificate errors (diagnosis only, unsafe)\n");
